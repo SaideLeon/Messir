@@ -11,6 +11,7 @@ import { scanExamForRawQuestions, generateQuizFromRawQuestions } from './service
 import { saveHistory } from './services/db';
 
 const QUESTIONS_PER_BATCH = 3;
+const SESSION_STORAGE_KEY = 'messir_active_session';
 
 const App: React.FC = () => {
   const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
@@ -23,9 +24,9 @@ const App: React.FC = () => {
   const [appLogo, setAppLogo] = useState<string | null>(null);
   
   // State to manage chunks/batches
-  // We now store the Raw extracted questions so we don't need to re-read the PDF
   const [rawQuestionsMap, setRawQuestionsMap] = useState<RawQuestion[]>([]);
   const [currentBatchIndex, setCurrentBatchIndex] = useState(0);
+  const [hasSavedSession, setHasSavedSession] = useState(false);
 
   // Dark Mode State
   const [isDarkMode, setIsDarkMode] = useState(() => {
@@ -46,6 +47,35 @@ const App: React.FC = () => {
       localStorage.setItem('theme', 'light');
     }
   }, [isDarkMode]);
+
+  // Load recoverable session
+  useEffect(() => {
+    const savedSession = localStorage.getItem(SESSION_STORAGE_KEY);
+    if (savedSession) {
+        try {
+            const data = JSON.parse(savedSession);
+            // Verify if session is valid (e.g. has raw questions)
+            if (data.rawQuestionsMap && data.rawQuestionsMap.length > 0) {
+                setHasSavedSession(true);
+            }
+        } catch (e) {
+            console.error("Error loading session", e);
+        }
+    }
+  }, []);
+
+  // Persist session logic
+  useEffect(() => {
+    if (rawQuestionsMap.length > 0) {
+        const sessionData = {
+            rawQuestionsMap,
+            currentBatchIndex,
+            timestamp: Date.now()
+        };
+        localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sessionData));
+        setHasSavedSession(true);
+    }
+  }, [rawQuestionsMap, currentBatchIndex]);
 
   const toggleDarkMode = () => setIsDarkMode(!isDarkMode);
 
@@ -74,6 +104,22 @@ const App: React.FC = () => {
     }
   };
 
+  const handleResumeSession = () => {
+      const savedSession = localStorage.getItem(SESSION_STORAGE_KEY);
+      if (savedSession) {
+          const data = JSON.parse(savedSession);
+          setRawQuestionsMap(data.rawQuestionsMap);
+          setCurrentBatchIndex(data.currentBatchIndex);
+          
+          // Resume logic: if we have more questions, process next batch
+          if (data.currentBatchIndex < data.rawQuestionsMap.length) {
+              processBatch(data.rawQuestionsMap, data.currentBatchIndex);
+          } else {
+              alert("Você já finalizou todas as questões deste exame salvo.");
+          }
+      }
+  };
+
   // Step 2 Helper: Take a slice of raw questions and solve them
   const processBatch = async (allQuestions: RawQuestion[], startIndex: number) => {
     setStatus(AppStatus.ANALYZING);
@@ -82,7 +128,6 @@ const App: React.FC = () => {
     const batchRaw = allQuestions.slice(startIndex, startIndex + QUESTIONS_PER_BATCH);
     
     if (batchRaw.length === 0) {
-       // Should not happen if logic is correct, but handling safety
        setErrorMsg("Não há mais questões para processar.");
        setStatus(AppStatus.RESULTS); 
        return;
@@ -124,6 +169,9 @@ const App: React.FC = () => {
     } else {
       // Finished all
       alert("Você completou todas as questões identificadas neste exame!");
+      // Optionally clear session
+      localStorage.removeItem(SESSION_STORAGE_KEY);
+      setHasSavedSession(false);
     }
   };
 
@@ -141,6 +189,8 @@ const App: React.FC = () => {
     setErrorMsg(null);
     setCurrentBatchIndex(0);
     setStatus(AppStatus.IDLE);
+    localStorage.removeItem(SESSION_STORAGE_KEY);
+    setHasSavedSession(false);
   };
 
   const handleReviewHistory = (record: HistoryRecord) => {
@@ -214,6 +264,23 @@ const App: React.FC = () => {
               onLogoGenerated={setAppLogo}
               currentLogo={appLogo}
              />
+             {hasSavedSession && (
+                <div className="mt-8 slide-up">
+                    <button 
+                        onClick={handleResumeSession}
+                        className="px-6 py-3 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-lg hover:shadow-xl hover:-translate-y-1 transition-all flex items-center gap-3 text-slate-700 dark:text-slate-200"
+                    >
+                        <span className="flex h-3 w-3 relative">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
+                            <span className="relative inline-flex rounded-full h-3 w-3 bg-indigo-500"></span>
+                        </span>
+                        <span className="font-medium">Continuar exame anterior</span>
+                        <span className="bg-slate-100 dark:bg-slate-700 px-2 py-0.5 rounded text-xs text-slate-500 dark:text-slate-400">
+                             Detectado
+                        </span>
+                    </button>
+                </div>
+             )}
           </div>
         )}
 
@@ -221,7 +288,7 @@ const App: React.FC = () => {
           <div className="flex-1 flex flex-col items-center justify-center p-4">
             <LoadingScreen 
               message="Mapeando Exame"
-              subMessage="Identificando todas as questões e imagens do arquivo..."
+              subMessage="Identificando todas as questões e imagens do arquivo... Isso ocorre apenas uma vez."
             />
           </div>
         )}
@@ -230,7 +297,7 @@ const App: React.FC = () => {
           <div className="flex-1 flex flex-col items-center justify-center p-4">
             <LoadingScreen 
               message="Resolvendo Questões"
-              subMessage="O Professor IA está preparando as explicações detalhadas deste lote..."
+              subMessage={`Lote Atual: Questões ${currentBatchIndex + 1} a ${Math.min(currentBatchIndex + QUESTIONS_PER_BATCH, rawQuestionsMap.length)} (de ${rawQuestionsMap.length} encontradas).`}
             />
           </div>
         )}

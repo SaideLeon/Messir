@@ -15,7 +15,7 @@ const rawScanSchema: Schema = {
       index: { type: Type.INTEGER, description: "Número sequencial da questão no arquivo." },
       content: { 
         type: Type.STRING, 
-        description: "O conteúdo COMPLETO da questão. Se houver imagens, gráficos ou diagramas, VOCÊ DEVE DESCREVÊ-LOS DETALHADAMENTE em texto aqui, pois a próxima etapa não verá a imagem original." 
+        description: "O enunciado COMPLETO. CRÍTICO: Se houver imagens, gráficos ou tabelas, descreva-os detalhadamente entre colchetes [Visual: ...]." 
       }
     },
     required: ["index", "content"]
@@ -66,14 +66,17 @@ export const scanExamForRawQuestions = async (base64Data: string): Promise<RawQu
 
     const prompt = `
       Analise este arquivo PDF de exame.
-      Sua tarefa é APENAS IDENTIFICAR e EXTRAIR todas as questões presentes.
+      Sua tarefa é Mapear todo o conteúdo para ser resolvido posteriormente.
       
-      PARA CADA QUESTÃO:
-      1. Extraia o texto do enunciado.
-      2. **MUITO IMPORTANTE**: Se a questão tiver IMAGEM, GRÁFICO ou TABELA, você DEVE escrever uma descrição textual detalhada dessa imagem junto com o texto. O solucionador no próximo passo NÃO terá acesso à imagem, apenas ao seu texto. Descreva a geometria, os valores nos eixos, ou os dados da tabela.
+      PARA CADA QUESTÃO (Identifique TODAS):
+      1. Identifique o número/índice.
+      2. Extraia TODO o texto do enunciado.
+      3. **CRÍTICO - DESCRIÇÃO VISUAL**: O sistema de resolução NÃO VERÁ O PDF ORIGINAL. Você é os "olhos" do sistema.
+         - Se houver gráficos: Descreva eixos, curvas, pontos notáveis e tendências.
+         - Se houver figuras geométricas: Descreva formas, vértices, ângulos e legendas.
+         - Se houver tabelas: Transcreva os dados da tabela em formato texto/markdown.
       
-      Retorne uma lista JSON simples com o índice e o conteúdo bruto (texto + descrição da imagem) de cada questão encontrada.
-      Não tente resolver a questão agora. Apenas extraia.
+      Retorne uma lista JSON com index e content (texto + descrições visuais).
     `;
 
     const response = await ai.models.generateContent({
@@ -94,7 +97,7 @@ export const scanExamForRawQuestions = async (base64Data: string): Promise<RawQu
     const jsonText = response.text;
     if (!jsonText) throw new Error("Não foi possível ler o PDF.");
 
-    const cleanJson = jsonText.replace(/```json/g, '').replace(/```/g, '').trim();
+    const cleanJson = jsonText.replace(/^```json/, '').replace(/```$/, '').trim();
     const rawData = JSON.parse(cleanJson);
 
     return rawData.map((item: any, idx: number) => ({
@@ -119,12 +122,13 @@ export const generateQuizFromRawQuestions = async (rawQuestions: RawQuestion[], 
     
     // We pass the raw content extracted in Phase 1
     const questionsContext = rawQuestions.map((q, i) => 
-      `Questão ${batchStartIndex + i + 1} (Contexto): ${q.content}`
+      `Questão ${batchStartIndex + i + 1} (Baseado no conteúdo visual descrito): ${q.content}`
     ).join("\n\n----------------\n\n");
 
     const prompt = `
       Você é um Tutor Professor de Matemática Especialista.
-      Abaixo estão ${rawQuestions.length} questões extraídas de um exame (texto e descrição de imagens).
+      Abaixo estão ${rawQuestions.length} questões extraídas de um exame.
+      Nota: As imagens foram descritas textualmente entre colchetes [Visual: ...]. Use essas descrições para entender a geometria ou gráficos.
       
       Sua tarefa é RESOLVER estas questões e formatá-las para um App de Quiz.
 
@@ -158,7 +162,7 @@ export const generateQuizFromRawQuestions = async (rawQuestions: RawQuestion[], 
     const jsonText = response.text;
     if (!jsonText) throw new Error("Erro ao gerar respostas.");
 
-    const cleanJson = jsonText.replace(/```json/g, '').replace(/```/g, '').trim();
+    const cleanJson = jsonText.replace(/^```json/, '').replace(/```$/, '').trim();
     const parsedData = JSON.parse(cleanJson);
 
     // Map to internal type, ensuring IDs align with the global batch index
