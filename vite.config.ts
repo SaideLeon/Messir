@@ -18,10 +18,12 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 3004,
       host: true, // Libera acesso externo (0.0.0.0)
+      allowedHosts: ['messir.nativespeak.app'],
     },
     preview: {
       port: 3004,
       host: true, // Libera acesso externo (0.0.0.0)
+      allowedHosts: ['messir.nativespeak.app'],
     },
     build: {
       target: 'esnext', // Garante suporte a recursos modernos
