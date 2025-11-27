@@ -1,6 +1,14 @@
 import React, { useEffect, useState } from 'react';
 
-const LoadingScreen: React.FC = () => {
+interface LoadingScreenProps {
+  message?: string;
+  subMessage?: string;
+}
+
+const LoadingScreen: React.FC<LoadingScreenProps> = ({ 
+  message = "Processando", 
+  subMessage = "A IA está trabalhando no seu material." 
+}) => {
   const [dots, setDots] = useState('');
 
   useEffect(() => {
@@ -25,9 +33,9 @@ const LoadingScreen: React.FC = () => {
             </div>
         </div>
         
-        <h2 className="text-2xl font-bold text-slate-800 dark:text-white mb-3">Analisando seu Exame{dots}</h2>
+        <h2 className="text-2xl font-bold text-slate-800 dark:text-white mb-3">{message}{dots}</h2>
         <p className="text-slate-500 dark:text-slate-400 leading-relaxed">
-            A IA está lendo as imagens do seu PDF, identificando as questões e resolvendo-as para criar seu plano de estudo. 
+            {subMessage}
         </p>
         
         <div className="mt-8 flex justify-center gap-3 opacity-50">

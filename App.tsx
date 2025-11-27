@@ -1,14 +1,16 @@
 
 import React, { useState, useEffect } from 'react';
-import { AppStatus, Question, HistoryRecord } from './types';
+import { AppStatus, Question, HistoryRecord, RawQuestion } from './types';
 import FileUpload from './components/FileUpload';
 import LoadingScreen from './components/LoadingScreen';
 import QuizInterface from './components/QuizInterface';
 import ResultsView from './components/ResultsView';
 import HistoryView from './components/HistoryView';
 import Logo from './components/Logo';
-import { analyzeExamPDF } from './services/geminiService';
+import { scanExamForRawQuestions, generateQuizFromRawQuestions } from './services/geminiService';
 import { saveHistory } from './services/db';
+
+const QUESTIONS_PER_BATCH = 3;
 
 const App: React.FC = () => {
   const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
@@ -21,8 +23,9 @@ const App: React.FC = () => {
   const [appLogo, setAppLogo] = useState<string | null>(null);
   
   // State to manage chunks/batches
-  const [currentBase64, setCurrentBase64] = useState<string | null>(null);
-  const [questionsProcessedCount, setQuestionsProcessedCount] = useState(0);
+  // We now store the Raw extracted questions so we don't need to re-read the PDF
+  const [rawQuestionsMap, setRawQuestionsMap] = useState<RawQuestion[]>([]);
+  const [currentBatchIndex, setCurrentBatchIndex] = useState(0);
 
   // Dark Mode State
   const [isDarkMode, setIsDarkMode] = useState(() => {
@@ -46,33 +49,52 @@ const App: React.FC = () => {
 
   const toggleDarkMode = () => setIsDarkMode(!isDarkMode);
 
+  // Step 1: File is selected. We SCAN the PDF to map all questions.
   const handleFileSelect = async (base64: string) => {
-    setCurrentBase64(base64);
-    setQuestionsProcessedCount(0); // Reset count for new file
-    await loadQuestionsBatch(base64, 0);
-  };
-
-  const loadQuestionsBatch = async (base64: string, skip: number) => {
-    setStatus(AppStatus.ANALYZING);
+    setStatus(AppStatus.SCANNING);
     setErrorMsg(null);
+    
     try {
-      const extractedQuestions = await analyzeExamPDF(base64, skip);
+      const allRawQuestions = await scanExamForRawQuestions(base64);
       
-      if (extractedQuestions.length === 0) {
-        if (skip > 0) {
-            // No more questions found after skipping
-            setErrorMsg("Você concluiu todas as questões identificadas neste exame!");
-            setStatus(AppStatus.RESULTS); // Go back to results to show "Done" state effectively
-            return;
-        }
+      if (allRawQuestions.length === 0) {
         throw new Error("Nenhuma questão foi identificada no PDF. Tente um arquivo com imagens mais nítidas.");
       }
 
-      setQuestions(extractedQuestions);
+      setRawQuestionsMap(allRawQuestions);
+      setCurrentBatchIndex(0);
+      
+      // Step 2: Automatically process the first batch
+      await processBatch(allRawQuestions, 0);
+
+    } catch (error: any) {
+      console.error(error);
+      setErrorMsg(error.message || "Falha ao ler o PDF.");
+      setStatus(AppStatus.ERROR);
+    }
+  };
+
+  // Step 2 Helper: Take a slice of raw questions and solve them
+  const processBatch = async (allQuestions: RawQuestion[], startIndex: number) => {
+    setStatus(AppStatus.ANALYZING);
+    
+    // Get next N questions
+    const batchRaw = allQuestions.slice(startIndex, startIndex + QUESTIONS_PER_BATCH);
+    
+    if (batchRaw.length === 0) {
+       // Should not happen if logic is correct, but handling safety
+       setErrorMsg("Não há mais questões para processar.");
+       setStatus(AppStatus.RESULTS); 
+       return;
+    }
+
+    try {
+      const solvedQuestions = await generateQuizFromRawQuestions(batchRaw, startIndex);
+      setQuestions(solvedQuestions);
       setStatus(AppStatus.QUIZ);
     } catch (error: any) {
       console.error(error);
-      setErrorMsg(error.message || "Ocorreu um erro desconhecido.");
+      setErrorMsg("Erro ao resolver as questões deste lote. Tente novamente.");
       setStatus(AppStatus.ERROR);
     }
   };
@@ -90,14 +112,18 @@ const App: React.FC = () => {
       userAnswers: answers
     });
 
-    // Update the total count of processed questions so the next batch skips these
-    setQuestionsProcessedCount(prev => prev + questions.length);
+    // Update index for next batch
+    setCurrentBatchIndex(prev => prev + questions.length);
     setStatus(AppStatus.RESULTS);
   };
 
   const handleLoadMore = () => {
-    if (currentBase64) {
-      loadQuestionsBatch(currentBase64, questionsProcessedCount);
+    // Check if we have more questions in the Raw Map
+    if (currentBatchIndex < rawQuestionsMap.length) {
+      processBatch(rawQuestionsMap, currentBatchIndex);
+    } else {
+      // Finished all
+      alert("Você completou todas as questões identificadas neste exame!");
     }
   };
 
@@ -109,11 +135,11 @@ const App: React.FC = () => {
 
   const handleReset = () => {
     setQuestions([]);
+    setRawQuestionsMap([]);
     setScore(0);
     setUserAnswers({});
     setErrorMsg(null);
-    setCurrentBase64(null);
-    setQuestionsProcessedCount(0);
+    setCurrentBatchIndex(0);
     setStatus(AppStatus.IDLE);
   };
 
@@ -122,6 +148,8 @@ const App: React.FC = () => {
     setScore(record.score);
     setStatus(AppStatus.RESULTS);
   };
+
+  const hasMoreQuestions = currentBatchIndex < rawQuestionsMap.length;
 
   return (
     <div className="h-screen flex flex-col bg-slate-50 dark:bg-slate-950 transition-colors duration-300 relative overflow-hidden font-sans text-slate-900 dark:text-slate-100">
@@ -189,9 +217,21 @@ const App: React.FC = () => {
           </div>
         )}
 
+        {status === AppStatus.SCANNING && (
+          <div className="flex-1 flex flex-col items-center justify-center p-4">
+            <LoadingScreen 
+              message="Mapeando Exame"
+              subMessage="Identificando todas as questões e imagens do arquivo..."
+            />
+          </div>
+        )}
+
         {status === AppStatus.ANALYZING && (
           <div className="flex-1 flex flex-col items-center justify-center p-4">
-            <LoadingScreen />
+            <LoadingScreen 
+              message="Resolvendo Questões"
+              subMessage="O Professor IA está preparando as explicações detalhadas deste lote..."
+            />
           </div>
         )}
 
@@ -210,8 +250,13 @@ const App: React.FC = () => {
               total={questions.length} 
               onRetry={handleRetry} 
               onNewFile={handleReset}
-              onLoadMore={handleLoadMore}
+              onLoadMore={hasMoreQuestions ? handleLoadMore : () => alert('Fim do exame!')}
             />
+            {!hasMoreQuestions && (
+              <div className="text-center p-4 text-slate-500 dark:text-slate-400">
+                Você completou todas as questões identificadas neste arquivo.
+              </div>
+            )}
            </div>
         )}
 

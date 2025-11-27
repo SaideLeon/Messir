@@ -7,6 +7,12 @@ export interface Question {
   explanation: string;
 }
 
+export interface RawQuestion {
+  id: number;
+  originalIndex: number; // To track position in PDF
+  content: string; // The raw text and image description extracted from PDF
+}
+
 export interface QuizState {
   questions: Question[];
   currentQuestionIndex: number;
@@ -17,7 +23,8 @@ export interface QuizState {
 
 export enum AppStatus {
   IDLE = 'IDLE',
-  ANALYZING = 'ANALYZING',
+  SCANNING = 'SCANNING', // New status for initial PDF map
+  ANALYZING = 'ANALYZING', // Solving specific batch
   QUIZ = 'QUIZ',
   RESULTS = 'RESULTS',
   HISTORY = 'HISTORY',

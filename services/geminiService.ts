@@ -1,22 +1,39 @@
 
 import { GoogleGenAI, Type, Schema } from "@google/genai";
-import { Question } from "../types";
+import { Question, RawQuestion } from "../types";
 
 // Initialize Gemini Client
 // Note: process.env.API_KEY is injected by the environment
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
+// Schema for Phase 1: Scanning
+const rawScanSchema: Schema = {
+  type: Type.ARRAY,
+  items: {
+    type: Type.OBJECT,
+    properties: {
+      index: { type: Type.INTEGER, description: "Número sequencial da questão no arquivo." },
+      content: { 
+        type: Type.STRING, 
+        description: "O conteúdo COMPLETO da questão. Se houver imagens, gráficos ou diagramas, VOCÊ DEVE DESCREVÊ-LOS DETALHADAMENTE em texto aqui, pois a próxima etapa não verá a imagem original." 
+      }
+    },
+    required: ["index", "content"]
+  }
+};
+
+// Schema for Phase 2: Solving
 const questionSchema: Schema = {
   type: Type.OBJECT,
   properties: {
     text: {
       type: Type.STRING,
-      description: "O enunciado da pergunta em Markdown. IMPORTANTE: Toda matemática deve estar entre cifrões, ex: $x^2$.",
+      description: "O enunciado formatado em Markdown. Matemática entre cifrões ($).",
     },
     options: {
       type: Type.ARRAY,
       items: { type: Type.STRING },
-      description: "Opções de resposta. Matemática deve estar entre cifrões, ex: $10\\pi$.",
+      description: "Opções de resposta. Matemática entre cifrões ($).",
     },
     correctAnswerIndex: {
       type: Type.INTEGER,
@@ -39,27 +56,79 @@ const examSchema: Schema = {
   items: questionSchema,
 };
 
-export const analyzeExamPDF = async (base64Data: string, skipCount: number = 0): Promise<Question[]> => {
+/**
+ * Phase 1: Reads the PDF once and identifies ALL questions.
+ * Does not solve them yet, just extracts context and image descriptions.
+ */
+export const scanExamForRawQuestions = async (base64Data: string): Promise<RawQuestion[]> => {
+  try {
+    const modelId = "gemini-2.5-flash";
+
+    const prompt = `
+      Analise este arquivo PDF de exame.
+      Sua tarefa é APENAS IDENTIFICAR e EXTRAIR todas as questões presentes.
+      
+      PARA CADA QUESTÃO:
+      1. Extraia o texto do enunciado.
+      2. **MUITO IMPORTANTE**: Se a questão tiver IMAGEM, GRÁFICO ou TABELA, você DEVE escrever uma descrição textual detalhada dessa imagem junto com o texto. O solucionador no próximo passo NÃO terá acesso à imagem, apenas ao seu texto. Descreva a geometria, os valores nos eixos, ou os dados da tabela.
+      
+      Retorne uma lista JSON simples com o índice e o conteúdo bruto (texto + descrição da imagem) de cada questão encontrada.
+      Não tente resolver a questão agora. Apenas extraia.
+    `;
+
+    const response = await ai.models.generateContent({
+      model: modelId,
+      contents: {
+        parts: [
+          { inlineData: { mimeType: "application/pdf", data: base64Data } },
+          { text: prompt },
+        ],
+      },
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: rawScanSchema,
+        temperature: 0.1, // High precision for extraction
+      },
+    });
+
+    const jsonText = response.text;
+    if (!jsonText) throw new Error("Não foi possível ler o PDF.");
+
+    const cleanJson = jsonText.replace(/```json/g, '').replace(/```/g, '').trim();
+    const rawData = JSON.parse(cleanJson);
+
+    return rawData.map((item: any, idx: number) => ({
+      id: idx,
+      originalIndex: item.index,
+      content: item.content
+    }));
+
+  } catch (error: any) {
+    console.error("Erro no scan:", error);
+    throw new Error("Falha ao mapear o arquivo PDF. Verifique se é um arquivo válido.");
+  }
+};
+
+/**
+ * Phase 2: Takes a batch of raw text questions and creates the Quiz object.
+ * Does NOT need the PDF file.
+ */
+export const generateQuizFromRawQuestions = async (rawQuestions: RawQuestion[], batchStartIndex: number): Promise<Question[]> => {
   try {
     const modelId = "gemini-2.5-flash"; 
-
-    // Lógica de Paginação:
-    // Pedimos APENAS 3 questões por vez para permitir explicações longas sem estourar o limite de tokens (cortar JSON).
-    // O parametro skipCount diz à IA quantas questões do início do PDF ela deve ignorar.
     
+    // We pass the raw content extracted in Phase 1
+    const questionsContext = rawQuestions.map((q, i) => 
+      `Questão ${batchStartIndex + i + 1} (Contexto): ${q.content}`
+    ).join("\n\n----------------\n\n");
+
     const prompt = `
       Você é um Tutor Professor de Matemática Especialista.
-      Sua tarefa é processar o exame em PDF por partes para criar um plano de estudo detalhado.
+      Abaixo estão ${rawQuestions.length} questões extraídas de um exame (texto e descrição de imagens).
+      
+      Sua tarefa é RESOLVER estas questões e formatá-las para um App de Quiz.
 
-      ### INSTRUÇÃO DE PAGINAÇÃO (CRÍTICO):
-      1. Analise o documento PDF sequencialmente.
-      2. **IGNORE** (pule) as primeiras **${skipCount}** questões que encontrar.
-      3. Após pular essas, extraia EXATAMENTE as **3 (TRÊS)** questões seguintes.
-      4. Se não houver mais questões após pular ${skipCount}, retorne uma lista vazia [].
-
-      ### REGRAS DE EXPLICAÇÃO (DETALHADA):
-      O aluno pediu explicações CLARAS e PASSO A PASSO. Não seja direto demais.
-      Para cada explicação:
+      ### REGRAS DE EXPLICAÇÃO:
       - **Comece listando os dados** da questão.
       - **Explique a teoria/fórmula** necessária.
       - **Mostre o cálculo passo a passo** com LaTeX.
@@ -70,22 +139,15 @@ export const analyzeExamPDF = async (base64Data: string, skipCount: number = 0):
       2. Use $$...$$ para equações principais em destaque.
       3. Escape barras invertidas corretamente para JSON (use \\frac, não \frac).
 
-      Retorne JSON válido.
+      INPUT:
+      ${questionsContext}
+
+      Retorne um JSON Array com os objetos de questão resolvidos.
     `;
 
     const response = await ai.models.generateContent({
       model: modelId,
-      contents: {
-        parts: [
-          {
-            inlineData: {
-              mimeType: "application/pdf",
-              data: base64Data,
-            },
-          },
-          { text: prompt },
-        ],
-      },
+      contents: { text: prompt }, // Text only! Fast and cheap.
       config: {
         responseMimeType: "application/json",
         responseSchema: examSchema,
@@ -94,36 +156,26 @@ export const analyzeExamPDF = async (base64Data: string, skipCount: number = 0):
     });
 
     const jsonText = response.text;
-    if (!jsonText) throw new Error("Não foi possível gerar dados a partir do PDF.");
+    if (!jsonText) throw new Error("Erro ao gerar respostas.");
 
-    // Clean potential markdown blocks if present
     const cleanJson = jsonText.replace(/```json/g, '').replace(/```/g, '').trim();
+    const parsedData = JSON.parse(cleanJson);
 
-    try {
-      const rawData = JSON.parse(cleanJson);
+    // Map to internal type, ensuring IDs align with the global batch index
+    const questions: Question[] = parsedData.map((q: any, index: number) => ({
+      id: batchStartIndex + index, 
+      text: q.text,
+      options: q.options || [],
+      correctAnswerIndex: q.correctAnswerIndex === -1 ? null : q.correctAnswerIndex,
+      correctAnswerText: q.correctAnswerText,
+      explanation: q.explanation,
+    }));
 
-      // Map to our internal type
-      const questions: Question[] = rawData.map((q: any, index: number) => ({
-        id: skipCount + index, // Keep ID consistent with global count
-        text: q.text,
-        options: q.options || [],
-        correctAnswerIndex: q.correctAnswerIndex === -1 ? null : q.correctAnswerIndex,
-        correctAnswerText: q.correctAnswerText,
-        explanation: q.explanation,
-      }));
-
-      return questions;
-    } catch (jsonError) {
-      console.error("Erro de Parse JSON:", jsonError, "Texto recebido:", cleanJson.substring(0, 200));
-      throw new Error("Erro ao ler a resposta da IA. Tente novamente.");
-    }
+    return questions;
 
   } catch (error: any) {
-    console.error("Erro ao analisar exame:", error);
-    if (error.message.includes("Erro ao ler a resposta")) {
-        throw error;
-    }
-    throw new Error("Falha ao processar o arquivo PDF. Verifique se o arquivo está legível.");
+    console.error("Erro na geração do quiz:", error);
+    throw new Error("Erro ao resolver as questões. Tente novamente.");
   }
 };
 

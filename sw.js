@@ -11,50 +11,63 @@ const URLS_TO_CACHE = [
 ];
 
 self.addEventListener('install', (event) => {
+  // Perform install steps
   event.waitUntil(
     caches.open(CACHE_NAME)
       .then((cache) => {
-        // Attempt to cache core assets. 
-        // We catch errors to prevent the entire install from failing if one CDN is flaky.
+        console.log('Opened cache');
+        // Catch errors to ensure installation continues even if one asset fails
         return cache.addAll(URLS_TO_CACHE).catch(err => {
-            console.warn('One or more assets failed to cache:', err);
+            console.warn('Failed to cache some assets during install:', err);
         });
       })
   );
+  // Force the waiting service worker to become the active service worker
+  self.skipWaiting();
 });
 
 self.addEventListener('fetch', (event) => {
-  // Navigation requests: Network first, fall back to cache (to ensure app updates)
+  // Filter out non-http requests (e.g. chrome-extension://)
+  if (!event.request.url.startsWith('http')) return;
+
+  // For navigation requests (HTML), use Network First, then Cache
   if (event.request.mode === 'navigate') {
     event.respondWith(
       fetch(event.request)
         .catch(() => {
-          return caches.match(event.request) || caches.match('./index.html');
+          return caches.match('./index.html') || caches.match('./');
         })
     );
     return;
   }
 
-  // Stale-while-revalidate strategy for other requests
+  // For other requests (CSS, JS, Images), use Stale-While-Revalidate
   event.respondWith(
-    caches.match(event.request).then((cachedResponse) => {
-      const fetchPromise = fetch(event.request).then((networkResponse) => {
-        // Update cache if network response is valid
-        if (networkResponse && networkResponse.status === 200 && networkResponse.type === 'basic') {
-          const responseToCache = networkResponse.clone();
-          caches.open(CACHE_NAME).then((cache) => {
-            cache.put(event.request, responseToCache);
-          });
-        }
-        return networkResponse;
-      }).catch(err => {
-         // Network failed
-         console.debug('Network fetch failed', err);
-      });
+    caches.match(event.request)
+      .then((cachedResponse) => {
+        // Fetch from network to update cache
+        const fetchPromise = fetch(event.request).then((networkResponse) => {
+            // Check if we received a valid response
+            if (!networkResponse || networkResponse.status !== 200) {
+                return networkResponse;
+            }
 
-      // Return cached response immediately if available, otherwise wait for network
-      return cachedResponse || fetchPromise;
-    })
+            // Allow caching of basic (same-origin) and cors (CDN) response types
+            if (networkResponse.type === 'basic' || networkResponse.type === 'cors') {
+                const responseToCache = networkResponse.clone();
+                caches.open(CACHE_NAME).then((cache) => {
+                    cache.put(event.request, responseToCache);
+                });
+            }
+
+            return networkResponse;
+        }).catch(err => {
+            console.debug('Fetch failed:', err);
+        });
+
+        // Return cached response immediately if available, otherwise wait for network
+        return cachedResponse || fetchPromise;
+      })
   );
 });
 
@@ -69,6 +82,9 @@ self.addEventListener('activate', (event) => {
           }
         })
       );
+    }).then(() => {
+        // Take control of all clients immediately
+        return self.clients.claim();
     })
   );
 });
