@@ -15,6 +15,14 @@ export default defineConfig(({ mode }) => {
       // Isso corrige o erro "ReferenceError: process is not defined" no navegador e carrega sua chave.
       'process.env.API_KEY': JSON.stringify(env.VITE_GEMINI_API_KEY || env.API_KEY),
     },
+    server: {
+      port: 3004,
+      host: true, // Libera acesso externo (0.0.0.0)
+    },
+    preview: {
+      port: 3004,
+      host: true, // Libera acesso externo (0.0.0.0)
+    },
     build: {
       target: 'esnext', // Garante suporte a recursos modernos
     }
