@@ -1,0 +1,246 @@
+
+import React, { useState, useEffect } from 'react';
+import { AppStatus, Question, HistoryRecord } from './types';
+import FileUpload from './components/FileUpload';
+import LoadingScreen from './components/LoadingScreen';
+import QuizInterface from './components/QuizInterface';
+import ResultsView from './components/ResultsView';
+import HistoryView from './components/HistoryView';
+import Logo from './components/Logo';
+import { analyzeExamPDF } from './services/geminiService';
+import { saveHistory } from './services/db';
+
+const App: React.FC = () => {
+  const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
+  const [questions, setQuestions] = useState<Question[]>([]);
+  const [score, setScore] = useState(0);
+  const [userAnswers, setUserAnswers] = useState<Record<number, number | string>>({});
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  
+  // Custom Logo State
+  const [appLogo, setAppLogo] = useState<string | null>(null);
+  
+  // State to manage chunks/batches
+  const [currentBase64, setCurrentBase64] = useState<string | null>(null);
+  const [questionsProcessedCount, setQuestionsProcessedCount] = useState(0);
+
+  // Dark Mode State
+  const [isDarkMode, setIsDarkMode] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const savedTheme = localStorage.getItem('theme');
+      if (savedTheme) return savedTheme === 'dark';
+      return window.matchMedia('(prefers-color-scheme: dark)').matches;
+    }
+    return false;
+  });
+
+  useEffect(() => {
+    if (isDarkMode) {
+      document.documentElement.classList.add('dark');
+      localStorage.setItem('theme', 'dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+      localStorage.setItem('theme', 'light');
+    }
+  }, [isDarkMode]);
+
+  const toggleDarkMode = () => setIsDarkMode(!isDarkMode);
+
+  const handleFileSelect = async (base64: string) => {
+    setCurrentBase64(base64);
+    setQuestionsProcessedCount(0); // Reset count for new file
+    await loadQuestionsBatch(base64, 0);
+  };
+
+  const loadQuestionsBatch = async (base64: string, skip: number) => {
+    setStatus(AppStatus.ANALYZING);
+    setErrorMsg(null);
+    try {
+      const extractedQuestions = await analyzeExamPDF(base64, skip);
+      
+      if (extractedQuestions.length === 0) {
+        if (skip > 0) {
+            // No more questions found after skipping
+            setErrorMsg("Você concluiu todas as questões identificadas neste exame!");
+            setStatus(AppStatus.RESULTS); // Go back to results to show "Done" state effectively
+            return;
+        }
+        throw new Error("Nenhuma questão foi identificada no PDF. Tente um arquivo com imagens mais nítidas.");
+      }
+
+      setQuestions(extractedQuestions);
+      setStatus(AppStatus.QUIZ);
+    } catch (error: any) {
+      console.error(error);
+      setErrorMsg(error.message || "Ocorreu um erro desconhecido.");
+      setStatus(AppStatus.ERROR);
+    }
+  };
+
+  const handleQuizFinish = (finalScore: number, answers: Record<number, number | string>) => {
+    setScore(finalScore);
+    setUserAnswers(answers);
+    
+    // Save to IndexedDB automatically
+    saveHistory({
+      date: new Date().toISOString(),
+      score: finalScore,
+      total: questions.length,
+      questions: questions,
+      userAnswers: answers
+    });
+
+    // Update the total count of processed questions so the next batch skips these
+    setQuestionsProcessedCount(prev => prev + questions.length);
+    setStatus(AppStatus.RESULTS);
+  };
+
+  const handleLoadMore = () => {
+    if (currentBase64) {
+      loadQuestionsBatch(currentBase64, questionsProcessedCount);
+    }
+  };
+
+  const handleRetry = () => {
+    setScore(0);
+    setUserAnswers({});
+    setStatus(AppStatus.QUIZ);
+  };
+
+  const handleReset = () => {
+    setQuestions([]);
+    setScore(0);
+    setUserAnswers({});
+    setErrorMsg(null);
+    setCurrentBase64(null);
+    setQuestionsProcessedCount(0);
+    setStatus(AppStatus.IDLE);
+  };
+
+  const handleReviewHistory = (record: HistoryRecord) => {
+    setQuestions(record.questions);
+    setScore(record.score);
+    setStatus(AppStatus.RESULTS);
+  };
+
+  return (
+    <div className="h-screen flex flex-col bg-slate-50 dark:bg-slate-950 transition-colors duration-300 relative overflow-hidden font-sans text-slate-900 dark:text-slate-100">
+      {/* Dynamic Background */}
+      <div className="absolute inset-0 z-0 overflow-hidden pointer-events-none">
+        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-indigo-100 dark:bg-indigo-900/20 rounded-full blur-[100px] opacity-60 dark:opacity-40"></div>
+        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-blue-100 dark:bg-blue-900/20 rounded-full blur-[100px] opacity-60 dark:opacity-40"></div>
+      </div>
+
+      <header className={`fixed top-0 w-full z-20 transition-all duration-300 ${status !== AppStatus.IDLE ? 'bg-white/90 dark:bg-slate-900/90 backdrop-blur-sm border-b border-slate-100 dark:border-slate-800 shadow-sm' : 'bg-transparent'}`}>
+        <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+          <div className="flex items-center gap-3 cursor-pointer" onClick={() => status !== AppStatus.QUIZ && setStatus(AppStatus.IDLE)}>
+             <Logo customUrl={appLogo} className="w-9 h-9" />
+             <span className="font-bold text-slate-800 dark:text-slate-100 text-lg tracking-tight hidden sm:inline">Messir</span>
+          </div>
+          
+          <div className="flex items-center gap-4">
+             {/* Dark Mode Toggle */}
+             <button
+              onClick={toggleDarkMode}
+              className="p-2 rounded-full text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800 transition-colors focus:outline-none"
+              title={isDarkMode ? "Mudar para modo claro" : "Mudar para modo escuro"}
+            >
+              {isDarkMode ? (
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M10 2a1 1 0 011 1v1a1 1 0 11-2 0V3a1 1 0 011-1zm4 8a4 4 0 11-8 0 4 4 0 018 0zm-.464 4.95l.707.707a1 1 0 001.414-1.414l-.707-.707a1 1 0 00-1.414 1.414zm2.12-10.607a1 1 0 010 1.414l-.706.707a1 1 0 11-1.414-1.414l.707-.707a1 1 0 011.414 0zM17 11a1 1 0 100-2h-1a1 1 0 100 2h1zm-7 4a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1zM5.05 6.464A1 1 0 106.465 5.05l-.708-.707a1 1 0 00-1.414 1.414l.707.707zm1.414 8.486l-.707.707a1 1 0 01-1.414-1.414l.707-.707a1 1 0 011.414 1.414zM4 11a1 1 0 100-2H3a1 1 0 000 2h1z" clipRule="evenodd" />
+                </svg>
+              ) : (
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                  <path d="M17.293 13.293A8 8 0 016.707 2.707a8.001 8.001 0 1010.586 10.586z" />
+                </svg>
+              )}
+            </button>
+
+            <button 
+              onClick={() => setStatus(AppStatus.HISTORY)}
+              className="text-sm font-semibold text-slate-600 dark:text-slate-300 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors flex items-center gap-2"
+            >
+               <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+               <span className="hidden sm:inline">Histórico</span>
+            </button>
+            
+            {status !== AppStatus.IDLE && status !== AppStatus.QUIZ && status !== AppStatus.HISTORY && (
+                <button 
+                onClick={handleReset}
+                className="text-sm font-semibold text-slate-500 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors"
+                >
+                Início
+                </button>
+            )}
+          </div>
+        </div>
+      </header>
+
+      <main className="flex-1 relative z-10 flex flex-col h-full overflow-hidden pt-16">
+        {status === AppStatus.IDLE && (
+          <div className="flex-1 flex flex-col items-center justify-center p-4">
+             <FileUpload 
+              onFileSelect={handleFileSelect} 
+              onLogoGenerated={setAppLogo}
+              currentLogo={appLogo}
+             />
+          </div>
+        )}
+
+        {status === AppStatus.ANALYZING && (
+          <div className="flex-1 flex flex-col items-center justify-center p-4">
+            <LoadingScreen />
+          </div>
+        )}
+
+        {status === AppStatus.QUIZ && questions.length > 0 && (
+          <QuizInterface 
+            questions={questions} 
+            onFinish={handleQuizFinish} 
+            onExit={handleReset}
+          />
+        )}
+
+        {status === AppStatus.RESULTS && (
+           <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+             <ResultsView 
+              score={score} 
+              total={questions.length} 
+              onRetry={handleRetry} 
+              onNewFile={handleReset}
+              onLoadMore={handleLoadMore}
+            />
+           </div>
+        )}
+
+        {status === AppStatus.HISTORY && (
+            <HistoryView onReview={handleReviewHistory} onBack={handleReset} />
+        )}
+
+        {status === AppStatus.ERROR && (
+          <div className="flex-1 flex flex-col items-center justify-center p-4">
+            <div className="bg-white dark:bg-slate-800 p-10 rounded-3xl shadow-xl max-w-md text-center border border-slate-100 dark:border-slate-700 slide-up">
+              <div className="w-16 h-16 bg-red-50 dark:bg-red-900/30 text-red-500 rounded-full flex items-center justify-center mx-auto mb-6">
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+              </div>
+              <h3 className="text-xl font-bold text-slate-800 dark:text-slate-100 mb-2">Ops! Algo deu errado.</h3>
+              <p className="text-slate-600 dark:text-slate-400 mb-8">{errorMsg}</p>
+              <button 
+                onClick={handleReset}
+                className="w-full py-3.5 bg-slate-900 dark:bg-indigo-600 text-white rounded-xl hover:bg-slate-800 dark:hover:bg-indigo-700 transition-all shadow-lg active:scale-95 font-semibold"
+              >
+                Tentar Novamente
+              </button>
+            </div>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+};
+
+export default App;
